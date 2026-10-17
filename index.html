@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Simulador de fork(), exec(), wait() y árbol de procesos</title>
+<style>
+  :root { --bg:#0f172a; --card:#1e293b; --line:#334155; --txt:#e2e8f0; --mut:#94a3b8; --acc:#38bdf8; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:system-ui,Segoe UI,sans-serif; background:var(--bg); color:var(--txt); padding:20px; }
+  h1 { margin:0 0 4px; font-size:1.5rem; } p.sub { margin:0 0 16px; color:var(--mut); }
+  .grid { display:grid; grid-template-columns:minmax(300px,420px) 1fr; gap:16px; }
+  @media (max-width:900px){ .grid{grid-template-columns:1fr;} }
+  .grid > div { min-width:0; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px; margin-bottom:16px; }
+  .card h2 { margin:0 0 10px; font-size:1rem; color:var(--acc); }
+  select,input,button,textarea { font:inherit; color:var(--txt); background:#0b1220; border:1px solid var(--line); border-radius:6px; padding:6px 8px; }
+  textarea { width:100%; height:230px; font-family:Consolas,monospace; font-size:.9rem; resize:vertical; }
+  button { cursor:pointer; background:#0369a1; border-color:#0284c7; } button:hover { background:#0284c7; }
+  button.sec { background:#334155; border-color:#475569; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:10px; }
+  table { border-collapse:collapse; width:100%; font-size:.88rem; }
+  th,td { border-bottom:1px solid var(--line); padding:4px 6px; text-align:center; } th { color:var(--mut); }
+  .tree ul { list-style:none; margin:0; padding-left:22px; border-left:1px dashed var(--line); }
+  .tree > ul { border-left:0; padding-left:0; }
+  .tree li { margin:6px 0; }
+  .node { display:inline-block; padding:3px 10px; border-radius:6px; font-weight:700; color:#0b1220; }
+  .s-run { background:#4ade80; } .s-ready { background:#38bdf8; } .s-wait { background:#facc15; }
+  .s-sleep { background:#c084fc; } .s-zombie { background:#f87171; } .s-done { background:#64748b; color:#e2e8f0; }
+  .cur { outline:3px solid #fff; }
+  .legend { color:var(--mut); font-size:.8rem; margin-top:6px; }
+  #out, #log { font-family:Consolas,monospace; font-size:.88rem; background:#0b1220; border-radius:6px; padding:8px; min-height:60px; max-height:200px; overflow:auto; margin:0; white-space:pre-wrap; }
+  #log { font-family:inherit; }
+  #log div { margin:3px 0; } #log div.last { color:#fff; font-weight:600; }
+  code { background:#0b1220; padding:1px 5px; border-radius:4px; }
+  .err { color:#fca5a5; min-height:1.1em; font-size:.85rem; }
+  .cmp td:first-child { text-align:left; } .cmp td { text-align:left; }
+  a { color:var(--acc); }
+</style>
+</head>
+<body>
+<h1>Simulador de procesos: fork · exec · wait · exit</h1>
+<p class="sub">Escribe un programa con instrucciones simples, ejecútalo paso a paso y mira cómo crece el árbol de procesos. Equivale a la práctica en Linux/UNIX; abajo se compara con Windows.</p>
+
+<div class="grid">
+  <div>
+    <div class="card">
+      <h2>Programa (ejecutan todos los procesos desde la línea 1)</h2>
+      <select id="preset"></select>
+      <textarea id="prog" spellcheck="false"></textarea>
+      <div class="err" id="err"></div>
+      <div class="row">
+        <label>Tras fork corre primero:
+          <select id="pol"><option value="parent">el padre</option><option value="child">el hijo</option></select></label>
+      </div>
+      <div class="row">
+        <button id="load">⟲ Cargar / reiniciar</button>
+        <button id="step">⏭ Paso</button>
+        <button id="play">⏵ Ejecutar todo</button>
+      </div>
+      <div class="legend">
+        Instrucciones: <code>fork</code> (deja <code>r</code>: 0 en el hijo, PID del hijo en el padre) ·
+        <code>if r==0 goto L</code> / <code>if r!=0 goto L</code> · <code>L:</code> etiqueta · <code>jmp L</code> ·
+        <code>print texto</code> · <code>wait</code> · <code>exec programa</code> · <code>sleep n</code> · <code>exit</code>
+      </div>
+    </div>
+    <div class="card">
+      <h2>Salida estándar</h2>
+      <pre id="out"></pre>
+    </div>
+  </div>
+
+  <div>
+    <div class="card">
+      <h2>Árbol de procesos</h2>
+      <div class="tree" id="tree"></div>
+      <div class="legend">
+        <span class="node s-run">ejecutando</span> <span class="node s-ready">listo</span>
+        <span class="node s-wait">en wait()</span> <span class="node s-sleep">sleep</span>
+        <span class="node s-zombie">zombi</span> <span class="node s-done">terminado</span> · borde blanco = próximo en ejecutarse
+      </div>
+    </div>
+    <div class="card">
+      <h2>Tabla de procesos</h2>
+      <table><thead><tr><th>PID</th><th>PPID</th><th>Imagen</th><th>Estado</th><th>PC</th><th>r</th></tr></thead><tbody id="tbl"></tbody></table>
+    </div>
+    <div class="card">
+      <h2>Qué pasó (paso a paso)</h2>
+      <div id="log"></div>
+    </div>
+    <div class="card">
+      <h2>Comparación Linux/UNIX vs Windows</h2>
+      <table class="cmp">
+        <tr><th>Idea</th><th>POSIX</th><th>Windows</th></tr>
+        <tr><td>Crear proceso</td><td><code>fork()</code> clona al padre</td><td><code>CreateProcess()</code> crea uno nuevo desde un ejecutable</td></tr>
+        <tr><td>Cargar otro programa</td><td><code>exec*()</code> reemplaza la imagen</td><td>incluido en <code>CreateProcess()</code></td></tr>
+        <tr><td>Esperar al hijo</td><td><code>wait()/waitpid()</code></td><td><code>WaitForSingleObject()</code></td></tr>
+        <tr><td>Terminar</td><td><code>exit()</code>; queda zombi hasta el <code>wait</code> del padre</td><td><code>ExitProcess()</code>; el kernel libera el objeto cuando se cierran los handles</td></tr>
+        <tr><td>Huérfanos</td><td>los adopta <code>init/systemd</code> (PID 1)</td><td>no se reasignan; el hijo sigue sin padre</td></tr>
+      </table>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const PRESETS = {
+  'fork + wait (básico)': `print antes del fork
+fork
+if r==0 goto hijo
+wait
+print el padre terminó de esperar
+exit
+hijo:
+print soy el hijo
+exit`,
+  'fork(); fork(); (2² = 4 procesos)': `fork
+fork
+print hola
+exit`,
+  'tres fork() seguidos (2³ = 8)': `fork
+fork
+fork
+print hola
+wait
+exit`,
+  'fork + exec + wait': `fork
+if r==0 goto hijo
+wait
+print el padre: ls ya terminó
+exit
+hijo:
+print hijo va a ejecutar ls
+exec ls
+exit`,
+  'zombi (padre no hace wait)': `fork
+if r==0 goto hijo
+print el padre duerme sin hacer wait
+sleep 8
+exit
+hijo:
+print el hijo termina ya
+exit`,
+  'huérfano (el padre termina antes)': `fork
+if r==0 goto hijo
+print el padre termina primero
+exit
+hijo:
+sleep 4
+print soy huérfano, me adoptó init (PID 1)
+exit`,
+  'cadena padre → hijo → nieto': `fork
+if r==0 goto hijo
+wait
+print abuelo listo
+exit
+hijo:
+fork
+if r==0 goto nieto
+wait
+print hijo listo
+exit
+nieto:
+print nieto listo
+exit`
+};
+Object.keys(PRESETS).forEach(k => $('preset').add(new Option(k, k)));
+$('preset').onchange = () => { $('prog').value = PRESETS[$('preset').value]; load(); };
+
+const MAX_PROCS = 32, MAX_STEPS = 600;
+let prog = [], labels = {}, procs = [], nextPid = 1000, step = 0, rr = 0, log = [], out = [], timer = null, finished = false;
+
+function parse(text) {
+  const ins = [], lab = {};
+  const lines = text.split('\n');
+  for (let n = 0; n < lines.length; n++) {
+    const raw = lines[n].replace(/#.*$/, '').trim();
+    if (!raw) continue;
+    let m;
+    if ((m = raw.match(/^([A-Za-z_]\w*):$/))) { lab[m[1]] = ins.length; continue; }
+    if ((m = raw.match(/^(fork|wait|exit)$/i))) { ins.push({ op: m[1].toLowerCase(), line: n + 1 }); continue; }
+    if ((m = raw.match(/^if\s+r\s*(==|!=)\s*0\s+goto\s+(\w+)$/i))) { ins.push({ op: 'if', eq: m[1] === '==', to: m[2], line: n + 1 }); continue; }
+    if ((m = raw.match(/^jmp\s+(\w+)$/i))) { ins.push({ op: 'jmp', to: m[1], line: n + 1 }); continue; }
+    if ((m = raw.match(/^print\s+(.*)$/i))) { ins.push({ op: 'print', text: m[1], line: n + 1 }); continue; }
+    if ((m = raw.match(/^exec\s+(\S+)$/i))) { ins.push({ op: 'exec', name: m[1], line: n + 1 }); continue; }
+    if ((m = raw.match(/^sleep\s+(\d+)$/i))) { ins.push({ op: 'sleep', n: +m[1], line: n + 1 }); continue; }
+    throw new Error(`Línea ${n + 1}: instrucción no válida → "${raw}"`);
+  }
+  ins.forEach(i => { if (i.to !== undefined && !(i.to in lab)) throw new Error(`Línea ${i.line}: etiqueta "${i.to}" no definida`); });
+  return { ins, lab };
+}
+
+function mkProc(pid, ppid, image, pc, r) { return { pid, ppid, image, pc, r, st: 'ready', code: null, wakeAt: 0 }; }
+
+function load() {
+  stop(); $('err').textContent = '';
+  try { const p = parse($('prog').value); prog = p.ins; labels = p.lab; }
+  catch (e) { $('err').textContent = e.message; return; }
+  nextPid = 1001; step = 0; rr = 0; finished = false; log = []; out = [];
+  procs = [mkProc(1000, 1, 'programa', 0, '-')];
+  say('Se crea el proceso inicial <b>PID 1000</b> (lo lanzó la shell). Cada proceso ejecuta el programa desde la primera línea.');
+  render();
+}
+const P = pid => procs.find(p => p.pid === pid);
+const say = h => log.push(h);
+const alive = p => p.st !== 'zombie' && p.st !== 'done';
+
+function reapZombie(parent) {
+  const z = procs.find(c => c.ppid === parent.pid && c.st === 'zombie');
+  if (z) { z.st = 'done'; z.ppid = -1; z.reaped = true; return z; }
+  return null;
+}
+
+function runnable() {
+  procs.filter(p => p.st === 'sleep' && p.wakeAt <= step).forEach(p => { p.st = 'ready'; say(`<b>PID ${p.pid}</b> despierta de <code>sleep</code>.`); });
+  return procs.filter(p => p.st === 'ready' || p.st === 'run');
+}
+function pickNext() {
+  const r = runnable(); if (!r.length) return null;
+  const pids = procs.map(p => p.pid);
+  for (let k = 0; k < pids.length; k++) {
+    const p = P(pids[(rr + k) % pids.length]);
+    if (p.st === 'ready' || p.st === 'run') return p;
+  }
+  return null;
+}
+
+function exitProc(p, why) {
+  const parent = P(p.ppid);
+  p.code = 0;
+  // los hijos vivos pasan a init; los zombis que tuviera los recoge init
+  procs.filter(c => c.ppid === p.pid).forEach(c => {
+    if (c.st === 'zombie') { c.st = 'done'; c.ppid = -1; say(`init (PID 1) recoge al zombi <b>${c.pid}</b>, que había quedado a cargo de ${p.pid}.`); }
+    else if (alive(c)) { c.ppid = 1; say(`<b>${c.pid}</b> queda <b>huérfano</b>: lo adopta <code>init</code> (PPID = 1).`); }
+  });
+  if (!parent || p.ppid === 1) {
+    p.st = 'done'; say(`<b>PID ${p.pid}</b> hace <code>exit</code>${why}; ${p.ppid === 1 ? 'init (o la shell) lo recoge' : 'se libera'} de inmediato.`);
+  } else if (parent.st === 'wait') {
+    p.st = 'done'; parent.st = 'ready';
+    say(`<b>PID ${p.pid}</b> hace <code>exit</code>${why}. El padre ${parent.pid} estaba en <code>wait()</code>: lo recoge y <b>despierta</b>.`);
+  } else {
+    p.st = 'zombie';
+    say(`<b>PID ${p.pid}</b> hace <code>exit</code>${why}. Su padre ${parent.pid} aún no llamó a <code>wait()</code>: queda <b>zombi</b> (la entrada de la tabla persiste).`);
+  }
+}
+
+function execOne() {
+  const p = pickNext();
+  if (!p) {
+    const w = procs.filter(x => x.st === 'wait');
+    if (procs.some(x => x.st === 'sleep')) { step++; say('Todos duermen: el tiempo avanza.'); return true; }
+    say(w.length ? '<b>Interbloqueo:</b> todos esperan en <code>wait()</code>.' : 'No quedan procesos ejecutables: la simulación terminó.');
+    finished = true; return false;
+  }
+  procs.forEach(x => { if (x.st === 'run') x.st = 'ready'; });
+  p.st = 'run'; step++;
+  rr = (procs.indexOf(p) + 1) % procs.length;
+  if (step > MAX_STEPS) { say('Se alcanzó el límite de pasos; se detiene la simulación.'); finished = true; return false; }
+  if (p.pc >= prog.length) { exitProc(p, ' (fin del programa)'); return true; }
+  const i = prog[p.pc];
+  const tag = `<b>PID ${p.pid}</b> (línea ${i.line}):`;
+  p.pc++;
+  switch (i.op) {
+    case 'fork': {
+      if (procs.filter(alive).length >= MAX_PROCS) { say(`${tag} <code>fork</code> falla: límite de ${MAX_PROCS} procesos (¡bomba fork!).`); p.r = -1; break; }
+      const c = mkProc(nextPid++, p.pid, p.image, p.pc, 0);
+      procs.push(c); p.r = c.pid;
+      say(`${tag} <code>fork()</code> crea el hijo <b>${c.pid}</b> como copia exacta. En el padre <code>r = ${c.pid}</code>; en el hijo <code>r = 0</code>. Ambos continúan en la siguiente línea.`);
+      if ($('pol').value === 'child') rr = procs.indexOf(c);
+      break; }
+    case 'if': {
+      const go = i.eq ? p.r === 0 : p.r !== 0;
+      say(`${tag} <code>r = ${p.r}</code> → condición ${go ? 'verdadera, salta a' : 'falsa, no salta a'} <code>${i.to}</code>.`);
+      if (go) p.pc = labels[i.to]; break; }
+    case 'jmp': p.pc = labels[i.to]; say(`${tag} salta a <code>${i.to}</code>.`); break;
+    case 'print': out.push(`[${p.pid}] ${i.text}`); say(`${tag} imprime "${i.text}".`); break;
+    case 'sleep': p.st = 'sleep'; p.wakeAt = step + i.n; say(`${tag} <code>sleep(${i.n})</code>: se bloquea ${i.n} pasos.`); break;
+    case 'wait': {
+      const z = reapZombie(p);
+      if (z) say(`${tag} <code>wait()</code> encuentra al zombi <b>${z.pid}</b> y lo recoge (se libera su entrada).`);
+      else if (procs.some(c => c.ppid === p.pid && alive(c))) { p.st = 'wait'; say(`${tag} <code>wait()</code>: tiene hijos vivos, <b>se bloquea</b> hasta que alguno termine.`); }
+      else say(`${tag} <code>wait()</code> devuelve -1: no tiene hijos.`);
+      break; }
+    case 'exec':
+      p.image = i.name; p.pc = prog.length; p.r = '-';
+      out.push(`[${p.pid}] (salida de ${i.name})`);
+      say(`${tag} <code>exec("${i.name}")</code> <b>reemplaza la imagen</b> del proceso: mismo PID ${p.pid}, programa nuevo. Nada del código anterior se ejecuta después.`);
+      break;
+    case 'exit': exitProc(p, ''); break;
+  }
+  return true;
+}
+
+function render() {
+  const kids = pid => procs.filter(p => p.ppid === pid);
+  const lbl = { run: 'ejecutando', ready: 'listo', wait: 'en wait()', sleep: 'sleep', zombie: 'zombi', done: 'terminado' };
+  const cls = { run: 's-run', ready: 's-ready', wait: 's-wait', sleep: 's-sleep', zombie: 's-zombie', done: 's-done' };
+  const nx = pickPeek();
+  const node = p => `<li><span class="node ${cls[p.st]} ${nx === p.pid ? 'cur' : ''}">PID ${p.pid} · ${p.image} · ${lbl[p.st]}</span>${kids(p.pid).length ? '<ul>' + kids(p.pid).map(node).join('') + '</ul>' : ''}</li>`;
+  const roots = procs.filter(p => !P(p.ppid) && p.ppid !== -1);
+  const gone = procs.filter(p => p.ppid === -1);
+  $('tree').innerHTML = '<ul>' + roots.map(node).join('') + '</ul>' + (gone.length ? `<div class="legend">Ya recogidos: ${gone.map(g => g.pid).join(', ')}</div>` : '');
+  $('tbl').innerHTML = procs.map(p => `<tr><td>${p.pid}</td><td>${p.ppid === -1 ? '—' : p.ppid}</td><td>${p.image}</td><td>${lbl[p.st]}</td><td>${Math.min(p.pc, prog.length)}</td><td>${p.r}</td></tr>`).join('');
+  $('out').textContent = out.join('\n');
+  $('log').innerHTML = log.map((l, i) => `<div class="${i >= log.length - 1 ? 'last' : ''}">${i + 1}. ${l}</div>`).join('');
+  $('log').scrollTop = $('log').scrollHeight; $('out').scrollTop = $('out').scrollHeight;
+  $('step').disabled = finished;
+}
+function pickPeek() {
+  if (finished) return null;
+  const pids = procs.map(p => p.pid);
+  for (let k = 0; k < pids.length; k++) {
+    const p = P(pids[(rr + k) % pids.length]);
+    if (p.st === 'ready' || p.st === 'run') return p.pid;
+  }
+  return null;
+}
+
+function stop() { clearInterval(timer); timer = null; $('play').textContent = '⏵ Ejecutar todo'; }
+$('load').onclick = load;
+$('step').onclick = () => { stop(); if (!finished) execOne(); render(); };
+$('play').onclick = () => {
+  if (timer) return stop();
+  if (finished) load();
+  $('play').textContent = '⏸ Pausar';
+  timer = setInterval(() => { if (finished || !execOne()) { stop(); } render(); if (finished) stop(); }, 500);
+};
+$('prog').value = PRESETS[$('preset').value]; load();
+</script>
+</body>
+</html>
